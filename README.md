@@ -1,0 +1,7 @@
+- My solutions for CS366 assignments. 
+- Structure: 
+    - Assignment-1: Basics (implementing GPT from scratch, tokenizer, etc)
+    - Assignment-2: Systems (FlashAttention kernel, distributed training)
+    - Assignment-3: Scaling laws
+    - Assignment-4: Data
+    - Assignment-5: Alignment
