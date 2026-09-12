@@ -17,6 +17,15 @@ class Linear(nn.Module):
 class Embedding(nn.Module): 
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None): 
         super().__init__()
-        pass
+        self.num_emb = num_embeddings
+        self.emb_dim = embedding_dim
+        self.device = device
+        self.dtype = dtype
+
+        self.weight = nn.Parameter(torch.empty((self.num_emb, self.emb_dim), device=self.device, dtype=self.dtype))
+        nn.init.trunc_normal_(self.weight, mean=0, std=1, a=-3, b=3)
+
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor: 
-        pass
+        token_ids.to(dtype=torch.int64)
+        return self.weight[token_ids]
+    
