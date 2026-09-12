@@ -13,3 +13,10 @@ class Linear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor: 
         return torch.matmul(x, self.W)
+
+class Embedding(nn.Module): 
+    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None): 
+        super().__init__()
+        pass
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor: 
+        pass
