@@ -222,6 +222,10 @@ class multihead_self_attention_rope(nn.Module):
 
 class transformer_block(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float,
+                 q_proj_weight: torch.Tensor, k_proj_weight: torch.Tensor,
+                 v_proj_weight: torch.Tensor, o_proj_weight: torch.Tensor,
+                 w1_weight: torch.Tensor, w2_weight: torch.Tensor, w3_weight: torch.Tensor,
+                 ln1_weight: torch.Tensor, ln2_weight: torch.Tensor,
                  device=None, dtype=None):
         super().__init__()
         self.d_model = d_model
@@ -230,11 +234,22 @@ class transformer_block(nn.Module):
         self.max_seq_len = max_seq_len
         self.theta = theta
 
-        self.attn = multihead_self_attention(d_model, num_heads, max_seq_len=max_seq_len,
-                                              theta=theta, device=device, dtype=dtype)
+        self.attn = multihead_self_attention_rope(
+            d_model, num_heads,
+            q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight,
+            max_seq_len=max_seq_len, theta=theta, device=device,
+        )
         self.ffn = SwiGLUFeedForward(d_model, d_ff, device=device, dtype=dtype)
         self.ln1 = RMSNorm(d_model, device=device, dtype=dtype)
         self.ln2 = RMSNorm(d_model, device=device, dtype=dtype)
+
+        with torch.no_grad():
+            # Your Linear.W is (in_features, out_features); reference is (out, in)
+            self.ffn.w1.W.copy_(w1_weight.T)
+            self.ffn.w2.W.copy_(w2_weight.T)
+            self.ffn.w3.W.copy_(w3_weight.T)
+            self.ln1.scale.copy_(ln1_weight)
+            self.ln2.scale.copy_(ln2_weight)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor = None) -> torch.Tensor:
         x = x + self.attn(self.ln1(x), token_positions=token_positions)
