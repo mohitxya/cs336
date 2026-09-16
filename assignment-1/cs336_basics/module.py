@@ -176,19 +176,67 @@ class multihead_self_attention(nn.Module):
         final_output = concat_output @ self.o_proj_weight
         return final_output
 
-class transformer_block(nn.Module): 
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float):
+class multihead_self_attention_rope(nn.Module): 
+    def __init__(self, d_model: int, num_heads: int, q_proj_weight: torch.Tensor, k_proj_weight: torch.Tensor, v_proj_weight: torch.Tensor, o_proj_weight: torch.Tensor, max_seq_len: int | None = None, theta: float | None = None, device=None): 
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.q_proj_weight = q_proj_weight
+        self.k_proj_weight = k_proj_weight
+        self.v_proj_weight = v_proj_weight
+        self.o_proj_weight = o_proj_weight
+        self.d_k = d_model // num_heads
+        self.sdpa = sdpa()
+
+        self.rope = None
+        if max_seq_len is not None and theta is not None:
+            self.rope = rope(theta, self.d_k, max_seq_len, device=device)
+
+    def forward(self, in_features: torch.Tensor, token_positions: torch.Tensor | None = None): 
+        q_proj = in_features @ self.q_proj_weight
+        k_proj = in_features @ self.k_proj_weight
+        v_proj = in_features @ self.v_proj_weight
+        
+        q_split = q_proj.view(*q_proj.shape[:-1], self.num_heads, self.d_k).transpose(-2,-3)
+        k_split = k_proj.view(*k_proj.shape[:-1], self.num_heads, self.d_k).transpose(-2,-3)
+        v_split = v_proj.view(*v_proj.shape[:-1], self.num_heads, self.d_k).transpose(-2,-3)
+
+        seq_len = in_features.shape[-2]
+
+        if self.rope is not None:
+            if token_positions is None:
+                token_positions = torch.arange(seq_len, device=in_features.device)
+            q_split = self.rope(q_split, token_positions)
+            k_split = self.rope(k_split, token_positions)
+
+        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=in_features.device))
+
+        attn_output = self.sdpa(Q=q_split, K=k_split, V=v_split, mask=mask)
+
+        attn_output = attn_output.transpose(-2, -3)
+
+        concat_output = attn_output.contiguous().view(*attn_output.shape[:-2], self.d_model)
+
+        final_output = concat_output @ self.o_proj_weight
+        return final_output
+
+class transformer_block(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float,
+                 device=None, dtype=None):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_ff = d_ff
         self.max_seq_len = max_seq_len
         self.theta = theta
-        self.sa = multihead_self_attention(d_model, num_heads, q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight)
-        self.ffn = SwiGLUFeedForward(d_model, d_ff)
-        self.rms_norm1 = RMSNorm(d_model)
-        self.rms_norm2 = RMSNorm(d_model)
-        self.rope = rope(theta, d_model//num_heads, max_seq_len)
-        self.dropout = nn.Dropout(0.1)
-    def forward(): 
-        pass 
+
+        self.attn = multihead_self_attention(d_model, num_heads, max_seq_len=max_seq_len,
+                                              theta=theta, device=device, dtype=dtype)
+        self.ffn = SwiGLUFeedForward(d_model, d_ff, device=device, dtype=dtype)
+        self.ln1 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.ln2 = RMSNorm(d_model, device=device, dtype=dtype)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor = None) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x), token_positions=token_positions)
+        x = x + self.ffn(self.ln2(x))
+        return x
