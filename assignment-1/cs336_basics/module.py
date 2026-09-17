@@ -1,6 +1,8 @@
 import torch 
 import torch.nn as nn
 import math
+from typing import Optional
+from collections.abc import Callable, Iterable
 
 class Linear(nn.Module): 
     def __init__(self, in_features: int, out_features: int, device=None, dtype=None): 
@@ -177,16 +179,19 @@ class multihead_self_attention(nn.Module):
         return final_output
 
 class multihead_self_attention_rope(nn.Module): 
-    def __init__(self, d_model: int, num_heads: int, q_proj_weight: torch.Tensor, k_proj_weight: torch.Tensor, v_proj_weight: torch.Tensor, o_proj_weight: torch.Tensor, max_seq_len: int | None = None, theta: float | None = None, device=None): 
+    def __init__(self, d_model: int, num_heads: int, max_seq_len: int | None = None, theta: float | None = None, device=None): 
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
-        self.q_proj_weight = q_proj_weight
-        self.k_proj_weight = k_proj_weight
-        self.v_proj_weight = v_proj_weight
-        self.o_proj_weight = o_proj_weight
         self.d_k = d_model // num_heads
-        self.sdpa = sdpa()
+        
+        # Initialize empty weights!
+        self.q_proj_weight = nn.Parameter(torch.empty(d_model, d_model, device=device))
+        self.k_proj_weight = nn.Parameter(torch.empty(d_model, d_model, device=device))
+        self.v_proj_weight = nn.Parameter(torch.empty(d_model, d_model, device=device))
+        self.o_proj_weight = nn.Parameter(torch.empty(d_model, d_model, device=device))
+        
+        self.sdpa = sdpa(device=device)
 
         self.rope = None
         if max_seq_len is not None and theta is not None:
@@ -212,21 +217,14 @@ class multihead_self_attention_rope(nn.Module):
         mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=in_features.device))
 
         attn_output = self.sdpa(Q=q_split, K=k_split, V=v_split, mask=mask)
-
         attn_output = attn_output.transpose(-2, -3)
-
         concat_output = attn_output.contiguous().view(*attn_output.shape[:-2], self.d_model)
 
         final_output = concat_output @ self.o_proj_weight
         return final_output
 
 class transformer_block(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float,
-                 q_proj_weight: torch.Tensor, k_proj_weight: torch.Tensor,
-                 v_proj_weight: torch.Tensor, o_proj_weight: torch.Tensor,
-                 w1_weight: torch.Tensor, w2_weight: torch.Tensor, w3_weight: torch.Tensor,
-                 ln1_weight: torch.Tensor, ln2_weight: torch.Tensor,
-                 device=None, dtype=None):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, max_seq_len: int, theta: float, device=None, dtype=None):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -234,24 +232,52 @@ class transformer_block(nn.Module):
         self.max_seq_len = max_seq_len
         self.theta = theta
 
+        # No weights passed here anymore!
         self.attn = multihead_self_attention_rope(
             d_model, num_heads,
-            q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight,
             max_seq_len=max_seq_len, theta=theta, device=device,
         )
         self.ffn = SwiGLUFeedForward(d_model, d_ff, device=device, dtype=dtype)
         self.ln1 = RMSNorm(d_model, device=device, dtype=dtype)
         self.ln2 = RMSNorm(d_model, device=device, dtype=dtype)
 
-        with torch.no_grad():
-            # Your Linear.W is (in_features, out_features); reference is (out, in)
-            self.ffn.w1.W.copy_(w1_weight.T)
-            self.ffn.w2.W.copy_(w2_weight.T)
-            self.ffn.w3.W.copy_(w3_weight.T)
-            self.ln1.scale.copy_(ln1_weight)
-            self.ln2.scale.copy_(ln2_weight)
-
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor = None) -> torch.Tensor:
         x = x + self.attn(self.ln1(x), token_positions=token_positions)
         x = x + self.ffn(self.ln2(x))
         return x
+
+class SGD(torch.optim.Optimizer):
+    def __init__(self, params, lr=1e-3):
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        defaults = {"lr": lr}
+        super().__init__(params, defaults)
+
+    def step(self, closure: Optional[Callable] = None):
+        loss = None if closure is None else closure()
+        
+        for group in self.param_groups:
+            lr = group["lr"]  # Get the learning rate.
+            
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                    
+                state = self.state[p]  # Get state associated with p.
+                t = state.get("t", 0)  # Get iteration number from the state, or 0.
+                grad = p.grad.data  # Get the gradient of loss with respect to p.
+                
+                p.data -= lr / math.sqrt(t + 1) * grad  # Update weight tensor in-place.
+                state["t"] = t + 1  # Increment iteration number.
+                
+        return loss
+
+if __name__=="__main__": 
+    weights = torch.nn.Parameter(5 * torch.randn((10, 10)))
+    opt = SGD([weights], lr=1e3)
+    for t in range(10):
+        opt.zero_grad()  # Reset the gradients for all learnable parameters.
+        loss = (weights**2).mean() # Compute a scalar loss value.
+        print(loss.cpu().item())
+        loss.backward() # Run backward pass, which computes gradients.
+        opt.step() # Run optimizer step.
