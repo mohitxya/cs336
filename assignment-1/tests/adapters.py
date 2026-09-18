@@ -12,6 +12,8 @@ from torch import Tensor
 from cs336_basics.bpe import *
 from cs336_basics.tokenizer import *
 from cs336_basics.module import *
+from cs336_basics.transformer_lm import *
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -205,23 +207,23 @@ def run_multihead_self_attention_with_rope(
         implementation with the given QKV projection weights and input features.
     """
     mha = multihead_self_attention_rope(
-        d_model=d_model,
-        num_heads=num_heads,
-        # reference weights are (out_features, in_features); your class does x @ W
-        q_proj_weight=q_proj_weight.T,
-        k_proj_weight=k_proj_weight.T,
-        v_proj_weight=v_proj_weight.T,
-        o_proj_weight=o_proj_weight.T,
-        max_seq_len=max_seq_len,
-        theta=theta,
-        device=in_features.device,
+        d_model=d_model, num_heads=num_heads,
+        max_seq_len=max_seq_len, theta=theta, device=in_features.device,
     )
+
+    with torch.no_grad():
+        mha.q_proj_weight.copy_(q_proj_weight.T)
+        mha.k_proj_weight.copy_(k_proj_weight.T)
+        mha.v_proj_weight.copy_(v_proj_weight.T)
+        mha.o_proj_weight.copy_(o_proj_weight.T)
 
     if token_positions is None:
         seq_len = in_features.shape[-2]
         token_positions = torch.arange(seq_len, device=in_features.device)
 
-    return mha(in_features, token_positions=token_positions)
+    mha.eval()
+    with torch.no_grad():
+        return mha(in_features, token_positions=token_positions)
 
 
 def run_rope(
@@ -323,31 +325,33 @@ def run_transformer_block(
     device = in_features.device
     dtype = in_features.dtype
 
+    # 1. Initialize empty block
     block = transformer_block(
-        d_model=d_model,
-        num_heads=num_heads,
-        d_ff=d_ff,
-        max_seq_len=max_seq_len,
-        theta=theta,
-        # attention weights: reference is (out, in) = W where proj = x @ W.T
-        # your mha does x @ W directly, so transpose here
-        q_proj_weight=weights["attn.q_proj.weight"].T,
-        k_proj_weight=weights["attn.k_proj.weight"].T,
-        v_proj_weight=weights["attn.v_proj.weight"].T,
-        o_proj_weight=weights["attn.output_proj.weight"].T,
-        w1_weight=weights["ffn.w1.weight"],
-        w2_weight=weights["ffn.w2.weight"],
-        w3_weight=weights["ffn.w3.weight"],
-        ln1_weight=weights["ln1.weight"],
-        ln2_weight=weights["ln2.weight"],
-        device=device,
-        dtype=dtype,
+        d_model=d_model, num_heads=num_heads, d_ff=d_ff,
+        max_seq_len=max_seq_len, theta=theta, device=device, dtype=dtype,
     )
 
+    # 2. Copy the weights over
+    with torch.no_grad():
+        block.attn.q_proj_weight.copy_(weights["attn.q_proj.weight"].T)
+        block.attn.k_proj_weight.copy_(weights["attn.k_proj.weight"].T)
+        block.attn.v_proj_weight.copy_(weights["attn.v_proj.weight"].T)
+        block.attn.o_proj_weight.copy_(weights["attn.output_proj.weight"].T)
+        
+        block.ffn.w1.W.copy_(weights["ffn.w1.weight"].T)
+        block.ffn.w2.W.copy_(weights["ffn.w2.weight"].T)
+        block.ffn.w3.W.copy_(weights["ffn.w3.weight"].T)
+        
+        block.ln1.scale.copy_(weights["ln1.weight"])
+        block.ln2.scale.copy_(weights["ln2.weight"])
+
+    # 3. Run inference
     seq_len = in_features.shape[-2]
     token_positions = torch.arange(seq_len, device=device)
-
-    return block(in_features, token_positions=token_positions)
+    
+    block.eval()
+    with torch.no_grad():
+        return block(in_features, token_positions=token_positions)
 
 
 def run_transformer_lm(
@@ -429,7 +433,52 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    model = TransformerLM(
+        vocab_size=vocab_size, 
+        context_length=context_length, 
+        d_model=d_model, 
+        num_layers=num_layers, 
+        num_heads=num_heads, 
+        d_ff=d_ff, 
+        theta=rope_theta
+    )
+    
+    # 2. Load the state dictionary
+    with torch.no_grad():
+        # Token Embeddings
+        model.token_embeddings.weight.copy_(weights["token_embeddings.weight"])
+        
+        # Transformer Blocks
+        for i in range(num_layers):
+            layer = model.layers[i]
+            prefix = f"layers.{i}."
+            
+            # Attention Weights
+            # Attention Weights
+            layer.attn.q_proj_weight.copy_(weights[prefix + "attn.q_proj.weight"].T)
+            layer.attn.k_proj_weight.copy_(weights[prefix + "attn.k_proj.weight"].T)
+            layer.attn.v_proj_weight.copy_(weights[prefix + "attn.v_proj.weight"].T)
+            layer.attn.o_proj_weight.copy_(weights[prefix + "attn.output_proj.weight"].T)
+            
+            # RMSNorm Weights
+            layer.ln1.scale.copy_(weights[prefix + "ln1.weight"])
+            layer.ln2.scale.copy_(weights[prefix + "ln2.weight"])
+            
+            # SwiGLU Weights (Transposed for your custom Linear class)
+            layer.ffn.w1.W.copy_(weights[prefix + "ffn.w1.weight"].T)
+            layer.ffn.w2.W.copy_(weights[prefix + "ffn.w2.weight"].T)
+            layer.ffn.w3.W.copy_(weights[prefix + "ffn.w3.weight"].T)
+            
+        # Final Norm and LM Head
+        model.ln_final.scale.copy_(weights["ln_final.weight"])
+        model.lm_head.W.copy_(weights["lm_head.weight"].T)
+        
+    # 3. Run inference
+    model.eval()
+    with torch.no_grad():
+        output = model(in_indices)
+        
+    return output
 
 
 def run_rmsnorm(
@@ -533,7 +582,12 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    ce = cross_entropy()
+
+    ce.eval()
+    with torch.no_grad():
+        result = ce(inputs, targets)
+    return result
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
