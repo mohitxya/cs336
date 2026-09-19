@@ -1,8 +1,8 @@
 import torch 
 import torch.nn as nn
 import math
-from typing import Optional
 from collections.abc import Callable, Iterable
+from typing import Callable, Optional, Tuple
 
 class Linear(nn.Module): 
     def __init__(self, in_features: int, out_features: int, device=None, dtype=None): 
@@ -272,6 +272,100 @@ class SGD(torch.optim.Optimizer):
                 
         return loss
 
+class adamw(torch.optim.Optimizer):
+    def __init__(self, params, lr: float = 1e-3, betas: Tuple[float, float] = (0.9, 0.999), eps: float = 1e-8, weight_decay: float = 1e-2): 
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if eps < 0:
+            raise ValueError(f"Invalid epsilon: {eps}")
+        if weight_decay < 0:
+            raise ValueError(f"Invalid weight decay: {weight_decay}")
+        if not (0 <= betas[0] < 1 and 0 <= betas[1] < 1):
+            raise ValueError(f"Invalid beta values: {betas}")
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
+        super().__init__(params, defaults)
+
+    @torch.no_grad
+    def step(self, closure: Optional[Callable] = None): 
+        loss = None
+        if closure is not None: 
+            with torch.enable_grad(): 
+                loss = closure()
+        for group in self.param_groups: 
+            beta1, beta2 = group["betas"]
+            eps = group["eps"]
+            lr = group["lr"]
+            weight_decay = group["weight_decay"]
+
+            for p in group['params']:
+                if p.grad is None: 
+                    continue
+                grad = p.grad
+                if grad.is_sparse: 
+                    raise RuntimeError("AdamW does not support sparse gradients")
+                state = self.state[p]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                    state["exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+                exp_avg = state["exp_avg"]
+                exp_avg_sq = state["exp_avg_sq"]
+                
+                state["step"] += 1
+                t = state["step"]
+
+                if weight_decay != 0:
+                    p.mul_(1.0 - lr * weight_decay)
+                
+                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+
+                bias_correction1 = 1.0 - beta1 ** t
+                bias_correction2 = 1.0 - beta2 ** t
+
+                step_size = lr * (math.sqrt(bias_correction2) / bias_correction1)
+
+                denom = exp_avg_sq.sqrt().add_(eps * math.sqrt(bias_correction2))
+                p.addcdiv_(exp_avg, denom, value=-step_size)
+        
+        return loss
+class learning_rate_scheduler(): 
+    def __init__(self, alpha_max: float, alpha_min: float, T_warm: int, T_cosine: int): 
+        self.alpha_max = alpha_max
+        self.alpha_min = alpha_min
+        self.T_warm = T_warm
+        self.T_cosine = T_cosine
+
+    def __call__(self, t: int) -> float:
+        if t < self.T_warm: 
+            return (t/self.T_warm) * self.alpha_max
+        
+        elif t<=self.T_cosine: 
+            progress = (t - self.T_warm) / (self.T_cosine - self.T_warm)
+            cosine_decay = 0.5*(1+math.cos(progress*math.pi))*(self.alpha_max - self.alpha_min)
+            return cosine_decay + self.alpha_min
+        else:
+            return self.alpha_min
+        
+class gradient_clipping(): 
+    def __init__(self, max_norm: float, eps: float = 1e-6):
+        self.max_norm = max_norm
+        self.eps = eps
+    def __call__(self, params: Iterable[torch.Tensor]) -> None: 
+        grads = [p.grad.detach() for p in params if p.grad is not None]
+        if len(grads) == 0: 
+            return 
+        norms = [torch.linalg.vector_norm(g) for g in grads]
+
+        total_norm = torch.linalg.vector_norm(torch.stack(norms))
+
+        if total_norm > self.max_norm:
+            scale_factor = self.max_norm / (total_norm + self.eps)
+            for g in grads:
+                g.mul_(scale_factor)
+                
+        return total_norm
+        
 if __name__=="__main__": 
     weights = torch.nn.Parameter(5 * torch.randn((10, 10)))
     opt = SGD([weights], lr=1e3)

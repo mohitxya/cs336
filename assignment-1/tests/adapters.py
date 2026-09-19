@@ -606,7 +606,7 @@ def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return adamw
 
 
 def run_get_lr_cosine_schedule(
@@ -634,7 +634,9 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    scheduler = learning_rate_scheduler(alpha_max = max_learning_rate, alpha_min = min_learning_rate, T_warm=warmup_iters, T_cosine=cosine_cycle_iters)
+    result = scheduler(it)
+    return result
 
 
 def run_save_checkpoint(
