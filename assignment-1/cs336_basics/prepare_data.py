@@ -105,55 +105,156 @@ def train_tokenizer(
     return Tokenizer.from_files(str(vocab_out), str(merges_out), special_tokens=special_tokens)
 
 
+def _encode_lines_worker(args: tuple) -> list[int]:
+    """Worker function for multiprocessing: encode a batch of lines."""
+    lines, vocab_path, merges_path, special_tokens = args
+    # Each worker loads its own tokenizer to avoid pickle issues with compiled regex
+    tok = Tokenizer.from_files(vocab_path, merges_path, special_tokens=special_tokens)
+    result: list[int] = []
+    for line in lines:
+        if line:
+            result.extend(tok.encode(line))
+    return result
+
+
 def tokenize_text_to_bin(
     input_text_path: str | os.PathLike,
     output_bin_path: str | os.PathLike,
     tokenizer: Tokenizer,
     chunk_lines: int = 10000,
     dtype: str = "uint16",
+    num_workers: int = 0,
+    vocab_path: str | os.PathLike | None = None,
+    merges_path: str | os.PathLike | None = None,
+    special_tokens: list[str] | None = None,
 ) -> int:
-    """Tokenize a text file line-by-line / chunk-by-chunk and write directly into a
+    """Tokenize a text file and write directly into a compact binary file.
 
-    compact binary file of integers (uint16 by default).
+    When num_workers > 0 (or left at 0 for auto-detect), uses multiprocessing
+    to parallelize encoding across CPU cores for a significant speedup.
+    Requires vocab_path and merges_path so workers can load their own tokenizer.
+
+    Falls back to single-process mode if tokenizer file paths are not provided.
     """
+    import multiprocessing as mp
+
     input_text_path = str(input_text_path)
     output_bin_path = str(output_bin_path)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_bin_path)), exist_ok=True)
     np_dtype = np.dtype(dtype)
 
-    print(f"Tokenizing {input_text_path} -> {output_bin_path} (dtype={dtype})...")
+    # Decide whether we can use multiprocessing
+    can_multiprocess = vocab_path is not None and merges_path is not None
+    if num_workers == 0:
+        num_workers = max(1, mp.cpu_count() - 1) if can_multiprocess else 1
+    if not can_multiprocess:
+        num_workers = 1
+
+    print(
+        f"Tokenizing {input_text_path} -> {output_bin_path} "
+        f"(dtype={dtype}, workers={num_workers})..."
+    )
     start_time = time.time()
 
-    total_tokens = 0
-    buffer: list[int] = []
+    if special_tokens is None:
+        special_tokens = list(tokenizer.special_tokens) if tokenizer.special_tokens else []
 
-    with open(input_text_path, "r", encoding="utf-8") as in_f, open(output_bin_path, "wb") as out_f:
-        for line_num, line in enumerate(in_f, start=1):
-            if line:
-                tokens = tokenizer.encode(line)
-                buffer.extend(tokens)
-                total_tokens += len(tokens)
+    if num_workers > 1:
+        # ---- Multiprocessing path ----
+        total_tokens = 0
+        lines_read = 0
 
-            if len(buffer) >= 200_000:
+        with open(input_text_path, "r", encoding="utf-8") as in_f, \
+             open(output_bin_path, "wb") as out_f, \
+             mp.Pool(num_workers) as pool:
+
+            batch: list[str] = []
+            pending_futures = []
+            # How many lines each worker gets per task
+            worker_chunk = chunk_lines
+
+            for line in in_f:
+                batch.append(line)
+                lines_read += 1
+
+                if len(batch) >= worker_chunk * num_workers:
+                    # Split batch into sub-chunks, one per worker
+                    chunks = [
+                        batch[i:i + worker_chunk]
+                        for i in range(0, len(batch), worker_chunk)
+                    ]
+                    tasks = [
+                        (chunk, str(vocab_path), str(merges_path), special_tokens)
+                        for chunk in chunks
+                    ]
+                    results = pool.map(_encode_lines_worker, tasks)
+                    for token_ids in results:
+                        total_tokens += len(token_ids)
+                        arr = np.array(token_ids, dtype=np_dtype)
+                        out_f.write(arr.tobytes())
+                    batch = []
+
+                    elapsed = time.time() - start_time
+                    tok_per_sec = total_tokens / max(elapsed, 1e-6)
+                    print(
+                        f"  Processed {lines_read:,} lines | "
+                        f"{total_tokens:,} tokens ({tok_per_sec:,.0f} tok/s)"
+                    )
+
+            # Process remaining lines
+            if batch:
+                chunks = [
+                    batch[i:i + worker_chunk]
+                    for i in range(0, len(batch), worker_chunk)
+                ]
+                tasks = [
+                    (chunk, str(vocab_path), str(merges_path), special_tokens)
+                    for chunk in chunks
+                ]
+                results = pool.map(_encode_lines_worker, tasks)
+                for token_ids in results:
+                    total_tokens += len(token_ids)
+                    arr = np.array(token_ids, dtype=np_dtype)
+                    out_f.write(arr.tobytes())
+    else:
+        # ---- Single-process fallback (original path) ----
+        total_tokens = 0
+        buffer: list[int] = []
+        lines_read = 0
+
+        with open(input_text_path, "r", encoding="utf-8") as in_f, \
+             open(output_bin_path, "wb") as out_f:
+            for line_num, line in enumerate(in_f, start=1):
+                lines_read = line_num
+                if line:
+                    tokens = tokenizer.encode(line)
+                    buffer.extend(tokens)
+                    total_tokens += len(tokens)
+
+                if len(buffer) >= 200_000:
+                    arr = np.array(buffer, dtype=np_dtype)
+                    out_f.write(arr.tobytes())
+                    buffer = []
+
+                if line_num % 100_000 == 0:
+                    elapsed = time.time() - start_time
+                    tok_per_sec = total_tokens / max(elapsed, 1e-6)
+                    print(
+                        f"  Processed {line_num:,} lines | "
+                        f"{total_tokens:,} tokens ({tok_per_sec:,.0f} tok/s)"
+                    )
+
+            if buffer:
                 arr = np.array(buffer, dtype=np_dtype)
                 out_f.write(arr.tobytes())
-                buffer = []
-
-            if line_num % 100_000 == 0:
-                elapsed = time.time() - start_time
-                tok_per_sec = total_tokens / max(elapsed, 1e-6)
-                print(f"  Processed {line_num:,} lines | {total_tokens:,} tokens ({tok_per_sec:,.0f} tok/s)")
-
-        if buffer:
-            arr = np.array(buffer, dtype=np_dtype)
-            out_f.write(arr.tobytes())
 
     elapsed = time.time() - start_time
     file_size_mb = os.path.getsize(output_bin_path) / (1024 * 1024)
     print(
         f"Completed {output_bin_path}: {total_tokens:,} tokens, "
-        f"{file_size_mb:.2f} MB in {elapsed:.1f}s ({total_tokens / max(elapsed, 1e-6):,.0f} tok/s)."
+        f"{file_size_mb:.2f} MB in {elapsed:.1f}s "
+        f"({total_tokens / max(elapsed, 1e-6):,.0f} tok/s)."
     )
     return total_tokens
 
@@ -180,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="All-in-one shortcut: train BPE on TinyStories sample and tokenize train and valid datasets",
     )
+    parser.add_argument("--num_workers", type=int, default=0, help="Number of parallel workers for tokenization (0 = auto-detect)")
     return parser
 
 
@@ -221,6 +323,10 @@ def main() -> None:
                 output_bin_path="data/tinystories_valid.bin",
                 tokenizer=tokenizer,
                 dtype=args.dataset_dtype,
+                vocab_path=vocab_path,
+                merges_path=merges_path,
+                special_tokens=special_tokens,
+                num_workers=args.num_workers,
             )
 
         # 3. Tokenize training dataset
@@ -229,6 +335,10 @@ def main() -> None:
             output_bin_path="data/tinystories_train.bin",
             tokenizer=tokenizer,
             dtype=args.dataset_dtype,
+            vocab_path=vocab_path,
+            merges_path=merges_path,
+            special_tokens=special_tokens,
+            num_workers=args.num_workers,
         )
 
         print("\nAll datasets prepared successfully!")
@@ -264,6 +374,10 @@ def main() -> None:
             output_bin_path=args.output_bin,
             tokenizer=tokenizer,
             dtype=args.dataset_dtype,
+            vocab_path=args.vocab_file,
+            merges_path=args.merges_file,
+            special_tokens=special_tokens,
+            num_workers=args.num_workers,
         )
 
 
