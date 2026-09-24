@@ -1,8 +1,11 @@
 import torch 
 import torch.nn as nn
 import math
+import os
+import typing
 from collections.abc import Callable, Iterable
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, BinaryIO, IO
+import numpy as np
 
 class Linear(nn.Module): 
     def __init__(self, in_features: int, out_features: int, device=None, dtype=None): 
@@ -365,7 +368,50 @@ class gradient_clipping():
                 g.mul_(scale_factor)
                 
         return total_norm
-        
+
+class data_loading(): 
+    def __init__(self, dataset: np.ndarray, batch_size: int, context_length: int, device: str):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.context_length = context_length
+        self.device = device
+
+        self.max_idx = len(dataset) - context_length - 1 # max safe starting index 
+    
+    def __call__(self) -> tuple[torch.Tensor, torch.Tensor]: 
+        ix = torch.randint(0, self.max_idx + 1, (self.batch_size,))
+        x_slices = [self.dataset[i:i + self.context_length] for i in ix]
+        y_slices = [self.dataset[i+1:i+1+self.context_length] for i in ix] 
+
+        x_tensor = torch.tensor(np.stack(x_slices), dtype = torch.long)
+        y_tensor = torch.tensor(np.stack(y_slices), dtype = torch.long)
+
+        return (x_tensor.to(self.device), y_tensor.to(self.device))
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+):
+    state = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iteration": iteration,
+    }
+    torch.save(state, out)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+) -> int:
+    checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    return checkpoint["iteration"]
+
 if __name__=="__main__": 
     weights = torch.nn.Parameter(5 * torch.randn((10, 10)))
     opt = SGD([weights], lr=1e3)
