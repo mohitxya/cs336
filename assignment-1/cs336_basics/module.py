@@ -173,7 +173,7 @@ class multihead_self_attention(nn.Module):
 
         seq_len = in_features.shape[-2]
 
-        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=in_features.device))
 
         attn_output = self.sdpa(Q=q_split, K=k_split, V=v_split, mask=mask)
 
@@ -421,7 +421,9 @@ def load_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
 ) -> int:
-    checkpoint = torch.load(src)
+    params = list(model.parameters())
+    device = params[0].device if params else "cpu"
+    checkpoint = torch.load(src, map_location=device)
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     return checkpoint["iteration"]

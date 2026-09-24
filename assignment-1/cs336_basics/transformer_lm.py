@@ -13,7 +13,7 @@ class TransformerLM(nn.Module):
         self.lm_head = Linear(d_model, vocab_size)
     
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor: 
-        token_ids.to(dtype=torch.int64)
+        token_ids = token_ids.to(dtype=torch.int64)
         
         x = self.token_embeddings(token_ids)
 

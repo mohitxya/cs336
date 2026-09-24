@@ -474,6 +474,7 @@ def run_transformer_lm(
         model.lm_head.W.copy_(weights["lm_head.weight"].T)
         
     # 3. Run inference
+    model.to(in_indices.device)
     model.eval()
     with torch.no_grad():
         output = model(in_indices)
