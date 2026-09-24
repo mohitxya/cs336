@@ -113,7 +113,10 @@ class rope(nn.Module):
         cos = cos.repeat_interleave(2, dim=-1)
         sin = sin.repeat_interleave(2, dim=-1)
 
-        
+        while cos.dim() < x.dim():
+            cos = cos.unsqueeze(-3)
+            sin = sin.unsqueeze(-3)
+
         return (x*cos) + (rotate_half(x) * sin) # allows us to use faster vector multiply
         
 class Softmax(nn.Module): 
@@ -368,6 +371,17 @@ class gradient_clipping():
                 g.mul_(scale_factor)
                 
         return total_norm
+
+class cross_entropy(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        max_logits = torch.max(inputs, dim=-1, keepdim=True).values
+        log_sum_exp = torch.log(torch.sum(torch.exp(inputs - max_logits), dim=-1)) + max_logits.squeeze(-1)
+        target_logits = torch.gather(inputs, dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+        loss = log_sum_exp - target_logits
+        return loss.mean()
 
 class data_loading(): 
     def __init__(self, dataset: np.ndarray, batch_size: int, context_length: int, device: str):

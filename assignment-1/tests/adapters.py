@@ -600,7 +600,8 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    gc = gradient_clipping(max_norm=max_l2_norm)
+    gc(parameters)
 
 
 def get_adamw_cls() -> Any:
